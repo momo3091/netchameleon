@@ -104,3 +104,54 @@ def test_active_adapter_preferred_over_first_listed(root, monkeypatch):
     p = app_module.OSPanel(root, "Windows", lambda msg, error=False: messages.append((msg, error)))
     root.update()
     assert p.current_adapter["id"] == "WiFi0"
+
+
+# --- IPOctetEntry widget ---
+
+def test_ip_octet_entry_get_set_roundtrip(root):
+    entry = app_module.IPOctetEntry(root)
+    entry.set_value("192.168.1.42")
+    assert entry.get_value() == "192.168.1.42"
+
+
+def test_ip_octet_entry_defaults_to_empty_dotted(root):
+    entry = app_module.IPOctetEntry(root)
+    assert entry.get_value() == "..."
+
+
+# --- static IP apply / revert to DHCP ---
+
+def test_apply_static_ip_rejects_invalid_input_without_calling_backend(panel, fake_backend):
+    fake_backend["static_ip_calls"] = []
+    import backend_windows
+    backend_windows.set_static_ip = lambda *a: fake_backend["static_ip_calls"].append(a)
+
+    panel.ip_octets.set_value("999.1.1.1")  # invalid octet
+    panel.mask_octets.set_value("255.255.255.0")
+    panel.gateway_octets.set_value("192.168.1.1")
+    panel.apply_static_ip()
+
+    assert fake_backend["static_ip_calls"] == []
+    assert any(err for _, err in panel.messages), "expected an error to be logged"
+
+
+def test_apply_static_ip_calls_backend_with_converted_prefix(panel, fake_backend):
+    calls = []
+    import backend_windows
+    backend_windows.set_static_ip = lambda name, ip, prefix, gw: calls.append((name, ip, prefix, gw))
+
+    panel.ip_octets.set_value("192.168.1.50")
+    panel.mask_octets.set_value("255.255.255.0")
+    panel.gateway_octets.set_value("192.168.1.1")
+    panel.apply_static_ip()
+
+    assert calls == [("Ethernet0", "192.168.1.50", 24, "192.168.1.1")]
+
+
+def test_revert_to_dhcp_calls_backend(panel, fake_backend):
+    calls = []
+    import backend_windows
+    backend_windows.set_dhcp = lambda name: calls.append(name)
+
+    panel.revert_to_dhcp()
+    assert calls == ["Ethernet0"]

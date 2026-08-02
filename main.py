@@ -110,6 +110,52 @@ class IdentityCard(ctk.CTkFrame):
 
 
 # --------------------------------------------------------------------------
+# A "[ . . . . ]" style entry for one IPv4 address, one octet per box.
+# --------------------------------------------------------------------------
+class IPOctetEntry(ctk.CTkFrame):
+    def __init__(self, master):
+        super().__init__(master, fg_color="transparent")
+        self.boxes = []
+        for i in range(4):
+            box = ctk.CTkEntry(self, width=44, justify="center", font=mono_font(14),
+                                fg_color=COLOR_PANEL_ALT, border_color=COLOR_BORDER, border_width=1)
+            box.grid(row=0, column=i * 2, padx=(0 if i == 0 else 3))
+            box.bind("<KeyRelease>", lambda e, idx=i: self._on_key_release(idx, e))
+            box.bind("<BackSpace>", lambda e, idx=i: self._on_backspace(idx, e))
+            self.boxes.append(box)
+            if i < 3:
+                ctk.CTkLabel(self, text=".", font=ui_font(16, "bold"), text_color=COLOR_TEXT_DIM, width=6
+                             ).grid(row=0, column=i * 2 + 1)
+
+    def _on_key_release(self, idx, event):
+        box = self.boxes[idx]
+        digits = "".join(c for c in box.get() if c.isdigit())[:3]
+        if digits and int(digits) > 255:
+            digits = digits[:2]
+        if digits != box.get():
+            box.delete(0, "end")
+            box.insert(0, digits)
+        if len(digits) >= 3 and idx < 3 and event.keysym not in ("BackSpace", "Delete", "Left", "Right"):
+            self.boxes[idx + 1].focus_set()
+            self.boxes[idx + 1].select_range(0, "end")
+
+    def _on_backspace(self, idx, event):
+        if not self.boxes[idx].get() and idx > 0:
+            self.boxes[idx - 1].focus_set()
+            self.boxes[idx - 1].select_range(0, "end")
+
+    def get_value(self) -> str:
+        return ".".join(b.get().strip() for b in self.boxes)
+
+    def set_value(self, ip: str):
+        parts = (ip or "").split(".")
+        for i, box in enumerate(self.boxes):
+            box.delete(0, "end")
+            if i < len(parts):
+                box.insert(0, parts[i])
+
+
+# --------------------------------------------------------------------------
 # One full panel of controls for a given OS.
 # --------------------------------------------------------------------------
 class OSPanel(ctk.CTkFrame):
@@ -204,11 +250,40 @@ class OSPanel(ctk.CTkFrame):
         ip_row.grid(row=4, column=0, sticky="ew")
         ip_row.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(ip_row, text="Adresse IP locale (DHCP)", font=ui_font(13, "bold"), text_color=COLOR_TEXT
-                     ).grid(row=0, column=0, padx=16, pady=14, sticky="w")
-        renew_btn = ctk.CTkButton(ip_row, text="🔁  Renouveler l'IP", command=self.renew_ip, width=160,
+        dhcp_line = ctk.CTkFrame(ip_row, fg_color="transparent")
+        dhcp_line.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 10))
+        dhcp_line.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(dhcp_line, text="Adresse IP locale (DHCP)", font=ui_font(13, "bold"), text_color=COLOR_TEXT
+                     ).grid(row=0, column=0, sticky="w")
+        renew_btn = ctk.CTkButton(dhcp_line, text="🔁  Renouveler l'IP", command=self.renew_ip, width=160,
                                    fg_color=COLOR_PANEL_ALT, hover_color=COLOR_BORDER, font=ui_font(13))
-        renew_btn.grid(row=0, column=1, padx=16, pady=14)
+        renew_btn.grid(row=0, column=1)
+
+        ctk.CTkFrame(ip_row, height=1, fg_color=COLOR_BORDER).grid(row=1, column=0, sticky="ew", padx=16)
+
+        ctk.CTkLabel(ip_row, text="IP manuelle (statique)", font=ui_font(13, "bold"), text_color=COLOR_TEXT
+                     ).grid(row=2, column=0, padx=16, pady=(12, 8), sticky="w")
+
+        fields = ctk.CTkFrame(ip_row, fg_color="transparent")
+        fields.grid(row=3, column=0, padx=16, sticky="w")
+        for r, (label, attr) in enumerate([("IP", "ip_octets"), ("Masque", "mask_octets"), ("Passerelle", "gateway_octets")]):
+            ctk.CTkLabel(fields, text=label, font=ui_font(11), text_color=COLOR_TEXT_DIM, width=80, anchor="w"
+                         ).grid(row=r, column=0, sticky="w", pady=3)
+            entry = IPOctetEntry(fields)
+            entry.grid(row=r, column=1, pady=3, sticky="w")
+            setattr(self, attr, entry)
+        self.mask_octets.set_value("255.255.255.0")
+
+        ip_buttons = ctk.CTkFrame(ip_row, fg_color="transparent")
+        ip_buttons.grid(row=4, column=0, padx=16, pady=(10, 16), sticky="w")
+        apply_ip_btn = ctk.CTkButton(ip_buttons, text="Appliquer l'IP statique", command=self.apply_static_ip,
+                                      fg_color=COLOR_TEAL, hover_color=COLOR_TEAL_HOVER, text_color="#0A1410",
+                                      font=ui_font(13, "bold"), height=34)
+        apply_ip_btn.grid(row=0, column=0, padx=(0, 8))
+        dhcp_revert_btn = ctk.CTkButton(ip_buttons, text="Repasser en DHCP", command=self.revert_to_dhcp,
+                                         fg_color="transparent", hover_color=COLOR_PANEL_ALT, border_width=1,
+                                         border_color=COLOR_BORDER, font=ui_font(13), height=34)
+        dhcp_revert_btn.grid(row=0, column=1)
 
         self.refresh_adapters()
 
@@ -370,6 +445,45 @@ class OSPanel(ctk.CTkFrame):
         finally:
             self._refresh_current_card()
 
+    def apply_static_ip(self):
+        if not self.current_adapter:
+            self.log("Aucun adaptateur sélectionné.", error=True)
+            return
+        ip, mask, gw = self.ip_octets.get_value(), self.mask_octets.get_value(), self.gateway_octets.get_value()
+        for label, value in (("IP", ip), ("masque", mask), ("passerelle", gw)):
+            if not mac_utils.is_valid_ipv4(value):
+                self.log(f"[{self.os_name}] Adresse {label} invalide : '{value}'", error=True)
+                return
+        try:
+            if self.os_name == "Windows":
+                import backend_windows as be
+                prefix = mac_utils.netmask_to_prefix_len(mask)
+                be.set_static_ip(self.current_adapter["id"], ip, prefix, gw)
+            else:
+                import backend_macos as be
+                be.set_static_ip(self.current_adapter["service_name"], ip, mask, gw)
+            self.log(f"[{self.os_name}] IP statique appliquée : {ip}")
+        except Exception as exc:  # noqa: BLE001 -- includes a malformed netmask, surfaced not swallowed
+            self.log(f"[{self.os_name}] Échec de l'IP statique : {exc}", error=True)
+        finally:
+            self._refresh_current_card()
+
+    def revert_to_dhcp(self):
+        if not self.current_adapter:
+            return
+        try:
+            if self.os_name == "Windows":
+                import backend_windows as be
+                be.set_dhcp(self.current_adapter["id"])
+            else:
+                import backend_macos as be
+                be.set_dhcp(self.current_adapter["service_name"])
+            self.log(f"[{self.os_name}] Repassé en DHCP automatique.")
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"[{self.os_name}] Échec du retour en DHCP : {exc}", error=True)
+        finally:
+            self._refresh_current_card()
+
 
 # --------------------------------------------------------------------------
 # Main window
@@ -378,9 +492,9 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("NetChameleon")
-        self.geometry("880x760")
+        self.geometry("880x820")
         self.configure(fg_color=COLOR_BG)
-        self.minsize(760, 680)
+        self.minsize(760, 560)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=28, pady=(24, 8))
@@ -428,13 +542,25 @@ class App(ctk.CTk):
 
         for tab in (win_tab, mac_tab):
             tab.grid_columnconfigure(0, weight=1)
+            tab.grid_rowconfigure(0, weight=1)
+
+        # Each panel lives inside a scrollable frame: if content ever
+        # exceeds the visible height (new sections added later, a small
+        # display, a shorter window), it scrolls instead of getting
+        # silently clipped -- the bug we hit when the log box grew.
+        win_scroll = ctk.CTkScrollableFrame(win_tab, fg_color="transparent")
+        win_scroll.grid(row=0, column=0, sticky="nsew")
+        win_scroll.grid_columnconfigure(0, weight=1)
+        mac_scroll = ctk.CTkScrollableFrame(mac_tab, fg_color="transparent")
+        mac_scroll.grid(row=0, column=0, sticky="nsew")
+        mac_scroll.grid_columnconfigure(0, weight=1)
 
         # Now that self.log_box exists, it's safe for a panel's initial
         # refresh_adapters() call to log to it.
         pad = dict(padx=18, pady=16)
-        self.win_panel = OSPanel(win_tab, "Windows", self.log)
+        self.win_panel = OSPanel(win_scroll, "Windows", self.log)
         self.win_panel.grid(row=0, column=0, sticky="ew", **pad)
-        self.mac_panel = OSPanel(mac_tab, "Darwin", self.log)
+        self.mac_panel = OSPanel(mac_scroll, "Darwin", self.log)
         self.mac_panel.grid(row=0, column=0, sticky="ew", **pad)
 
         # --- Final visual stacking: header (already packed, top) / tabview

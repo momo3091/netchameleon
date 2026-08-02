@@ -101,3 +101,11 @@ def set_static_ip(adapter_name: str, ip: str, prefix_len: int, gateway: str):
         f"New-NetIPAddress -InterfaceAlias '{adapter_name}' -IPAddress {ip} "
         f"-PrefixLength {prefix_len} -DefaultGateway {gateway} -ErrorAction Stop"
     )
+
+
+def set_dhcp(adapter_name: str):
+    """Revert a statically-configured adapter back to automatic (DHCP) addressing."""
+    _run_ps(
+        f"Remove-NetIPAddress -InterfaceAlias '{adapter_name}' -Confirm:$false -ErrorAction SilentlyContinue; "
+        f"Set-NetIPInterface -InterfaceAlias '{adapter_name}' -Dhcp Enabled -ErrorAction Stop"
+    )

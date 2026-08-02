@@ -5,6 +5,7 @@ No OS calls here on purpose -- this module is 100% unit-testable
 on any platform, independent of backend_windows.py / backend_macos.py.
 """
 
+import ipaddress
 import random
 import re
 
@@ -61,3 +62,21 @@ def generate_vendor_style_mac(oui: str) -> str:
 def mac_vendor_prefix(mac: str) -> str:
     """'AC:DE:48:12:34:56' -> 'AC:DE:48'"""
     return ":".join(mac.split(":")[:3]).upper()
+
+
+def is_valid_ipv4(value: str) -> bool:
+    """True for a plain IPv4 address like '192.168.1.50'. Rejects CIDR
+    notation, IPv6, and anything else -- the static-IP fields want four
+    separate plain-address strings, not shorthand."""
+    if not value or "/" in value:
+        return False
+    try:
+        ipaddress.IPv4Address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def netmask_to_prefix_len(netmask: str) -> int:
+    """'255.255.255.0' -> 24. Raises ValueError if it isn't a valid mask."""
+    return ipaddress.IPv4Network(f"0.0.0.0/{netmask}").prefixlen
