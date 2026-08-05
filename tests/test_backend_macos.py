@@ -50,7 +50,7 @@ def test_get_live_mac_returns_none_without_ether_line(monkeypatch):
     assert be.get_live_mac("utun0") is None
 
 
-# --- set_mac_address: the "Wi-Fi left disabled after a failed change" bug ---
+# --- set_mac_address: Wi-Fi-aware recovery, and "never left disabled" ---
 
 def test_set_mac_uses_direct_form_when_it_succeeds(monkeypatch):
     """If the direct ether change works, we must not touch link state at all."""
@@ -60,36 +60,8 @@ def test_set_mac_uses_direct_form_when_it_succeeds(monkeypatch):
     assert calls == [["ifconfig", "en0", "ether", "aa:bb:cc:dd:ee:ff"]]
 
 
-def test_set_mac_retries_direct_form_once_before_falling_back(monkeypatch):
-    """
-    Field report: the direct form sometimes hits a transient 'Network is
-    down' right after a previous change while the interface is still
-    settling. A short-delayed retry of the same direct form should be
-    tried before resorting to the invasive down/up bracket.
-    """
-    monkeypatch.setattr(be.time, "sleep", lambda s: None)  # keep the test instant
-    calls = []
-    attempt = {"n": 0}
-
-    def fake_run(cmd, use_sudo=False, timeout=20):
-        calls.append(cmd)
-        if cmd[-2:] == ["ether", "aa:bb:cc:dd:ee:ff"]:
-            attempt["n"] += 1
-            if attempt["n"] == 1:
-                raise be.AdapterError("simulated: transient Network is down")
-        # second attempt (still direct form, no down/up) succeeds
-
-    monkeypatch.setattr(be, "_run", fake_run)
-    be.set_mac_address("en0", "AA:BB:CC:DD:EE:FF")
-    assert calls == [
-        ["ifconfig", "en0", "ether", "aa:bb:cc:dd:ee:ff"],  # 1st direct attempt, fails
-        ["ifconfig", "en0", "ether", "aa:bb:cc:dd:ee:ff"],  # 2nd direct attempt, succeeds
-    ]
-    assert ["ifconfig", "en0", "down"] not in calls, "should not need the down/up bracket at all"
-
-
-def test_set_mac_falls_back_to_down_up_bracket_after_two_direct_failures(monkeypatch):
-    """If both direct attempts fail, fall back to down -> ether -> up, in order."""
+def test_set_mac_non_wifi_falls_back_to_ifconfig_down_up(monkeypatch):
+    """Non-Wi-Fi (e.g. Ethernet): if direct fails, fall back to down -> ether -> up."""
     monkeypatch.setattr(be.time, "sleep", lambda s: None)
     calls = []
     ether_attempts = {"n": 0}
@@ -98,27 +70,75 @@ def test_set_mac_falls_back_to_down_up_bracket_after_two_direct_failures(monkeyp
         calls.append(cmd)
         if cmd[-2:] == ["ether", "aa:bb:cc:dd:ee:ff"]:
             ether_attempts["n"] += 1
-            if ether_attempts["n"] <= 2:  # first two attempts (both direct form) fail
+            if ether_attempts["n"] == 1:
                 raise be.AdapterError("simulated: rejected without down first")
-            # third attempt, inside the down/up bracket, succeeds
 
     monkeypatch.setattr(be, "_run", fake_run)
-    be.set_mac_address("en0", "AA:BB:CC:DD:EE:FF")
+    be.set_mac_address("en0", "AA:BB:CC:DD:EE:FF", is_wifi=False)
     assert calls == [
-        ["ifconfig", "en0", "ether", "aa:bb:cc:dd:ee:ff"],  # 1st direct attempt, fails
-        ["ifconfig", "en0", "ether", "aa:bb:cc:dd:ee:ff"],  # 2nd direct attempt, fails
+        ["ifconfig", "en0", "ether", "aa:bb:cc:dd:ee:ff"],  # direct attempt, fails
         ["ifconfig", "en0", "down"],
-        ["ifconfig", "en0", "ether", "aa:bb:cc:dd:ee:ff"],  # retry inside the bracket
+        ["ifconfig", "en0", "ether", "aa:bb:cc:dd:ee:ff"],  # retry inside the bracket, succeeds
         ["ifconfig", "en0", "up"],
     ]
 
 
-def test_wifi_is_never_left_down_when_the_bracketed_change_also_fails(monkeypatch):
+def test_set_mac_wifi_falls_back_to_airport_power_cycle(monkeypatch):
     """
-    The exact bug from the field report: both direct attempts fail, then
-    the ether change inside the down/up bracket ALSO fails (e.g. the real
-    'Network is down' ioctl error). The interface must still come back
-    up before the error propagates.
+    Field evidence: for an actively-associated Wi-Fi interface, a plain
+    ifconfig down/up bracket does NOT release the association -- the
+    change is rejected the same way either way. Power-cycling the
+    AirPort radio via networksetup is the fallback that actually works.
+    """
+    monkeypatch.setattr(be.time, "sleep", lambda s: None)
+    calls = []
+    ether_attempts = {"n": 0}
+
+    def fake_run(cmd, use_sudo=False, timeout=20):
+        calls.append(cmd)
+        if cmd[-2:] == ["ether", "aa:bb:cc:dd:ee:ff"]:
+            ether_attempts["n"] += 1
+            if ether_attempts["n"] == 1:
+                raise be.AdapterError("simulated: ioctl (SIOCAIFADDR): Network is down")
+
+    monkeypatch.setattr(be, "_run", fake_run)
+    be.set_mac_address("en0", "AA:BB:CC:DD:EE:FF", is_wifi=True)
+    assert calls == [
+        ["ifconfig", "en0", "ether", "aa:bb:cc:dd:ee:ff"],  # direct attempt, fails
+        ["networksetup", "-setairportpower", "en0", "off"],
+        ["ifconfig", "en0", "ether", "aa:bb:cc:dd:ee:ff"],  # retry inside the bracket, succeeds
+        ["networksetup", "-setairportpower", "en0", "on"],
+    ]
+    assert "down" not in [c[-1] for c in calls if c[0] == "ifconfig"], \
+        "must not use plain link-state down for Wi-Fi -- that's the bug being fixed"
+
+
+def test_ethernet_is_never_left_down_when_the_bracketed_change_also_fails(monkeypatch):
+    """Non-Wi-Fi: if the change fails even inside the down/up bracket, the
+    interface must still come back up before the error propagates."""
+    monkeypatch.setattr(be.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_run(cmd, use_sudo=False, timeout=20):
+        calls.append(cmd)
+        if cmd[-2:] == ["ether", "aa:bb:cc:dd:ee:ff"]:
+            raise be.AdapterError("simulated: ioctl (SIOCAIFADDR): Network is down")
+
+    monkeypatch.setattr(be, "_run", fake_run)
+    try:
+        be.set_mac_address("en0", "AA:BB:CC:DD:EE:FF", is_wifi=False)
+        assert False, "expected AdapterError to propagate"
+    except be.AdapterError:
+        pass
+    assert calls[-1] == ["ifconfig", "en0", "up"], "interface must be brought back up even on failure"
+
+
+def test_wifi_radio_is_never_left_off_when_the_bracketed_change_also_fails(monkeypatch):
+    """
+    The exact bug from the field report, Wi-Fi edition: if the change
+    fails even inside the airport-power bracket, the radio must still
+    be turned back on before the error propagates -- a failed attempt
+    must never leave Wi-Fi disabled.
     """
     monkeypatch.setattr(be.time, "sleep", lambda s: None)
     calls = []
@@ -130,9 +150,17 @@ def test_wifi_is_never_left_down_when_the_bracketed_change_also_fails(monkeypatc
 
     monkeypatch.setattr(be, "_run", fake_run)
     try:
-        be.set_mac_address("en0", "AA:BB:CC:DD:EE:FF")
+        be.set_mac_address("en0", "AA:BB:CC:DD:EE:FF", is_wifi=True)
         assert False, "expected AdapterError to propagate"
     except be.AdapterError:
         pass
-    assert ["ifconfig", "en0", "up"] in calls, "interface must be brought back up even on failure"
-    assert calls[-1] == ["ifconfig", "en0", "up"], "up must be the last action taken"
+    assert ["networksetup", "-setairportpower", "en0", "on"] in calls, \
+        "Wi-Fi radio must be turned back on even on failure"
+    assert calls[-1] == ["networksetup", "-setairportpower", "en0", "on"], "must be the last action taken"
+
+
+def test_restore_original_mac_passes_through_is_wifi(monkeypatch):
+    calls = []
+    monkeypatch.setattr(be, "set_mac_address", lambda device, mac, is_wifi=False: calls.append((device, mac, is_wifi)))
+    be.restore_original_mac("en0", "AA:BB:CC:DD:EE:FF", is_wifi=True)
+    assert calls == [("en0", "AA:BB:CC:DD:EE:FF", True)]

@@ -68,7 +68,8 @@ def normalized_adapters(os_name: str):
         import backend_macos as be
         raw = be.list_adapters()
         return [{"id": a["device"], "label": f'{a["port"]} ({a["device"]})',
-                  "mac": a.get("mac", "").upper(), "service_name": a["port"]} for a in raw]
+                  "mac": a.get("mac", "").upper(), "service_name": a["port"],
+                  "is_wifi": a["port"].strip().lower() in ("wi-fi", "airport")} for a in raw]
 
 
 # --------------------------------------------------------------------------
@@ -364,9 +365,18 @@ class OSPanel(ctk.CTkFrame):
 
         labels = [a["label"] for a in self.adapters]
         self.adapter_menu.configure(values=labels)
-        best = self._pick_active_adapter(self.adapters)
-        self.adapter_menu.set(best["label"])
-        self._select_adapter(best)
+
+        # Prefer staying on whatever adapter was already selected, even
+        # if it's transiently without an IP (e.g. mid-reconnect right
+        # after a MAC change) -- only auto-pick the "best" adapter when
+        # there's no existing selection to preserve (first load, or the
+        # previously-selected adapter disappeared entirely).
+        kept = None
+        if self.current_adapter:
+            kept = next((a for a in self.adapters if a["id"] == self.current_adapter["id"]), None)
+        chosen = kept or self._pick_active_adapter(self.adapters)
+        self.adapter_menu.set(chosen["label"])
+        self._select_adapter(chosen)
 
     def _pick_active_adapter(self, adapters):
         """Prefer whichever adapter is actually carrying traffic (has an
@@ -469,7 +479,8 @@ class OSPanel(ctk.CTkFrame):
                 be.set_mac_address(self.current_adapter["id"], self.pending_mac)
             else:
                 import backend_macos as be
-                be.set_mac_address(self.current_adapter["id"], self.pending_mac)
+                be.set_mac_address(self.current_adapter["id"], self.pending_mac,
+                                    is_wifi=self.current_adapter.get("is_wifi", False))
             self.log(f"[{self.os_name}] Adresse appliquée avec succès : {self.pending_mac}")
             if self.os_name == "Darwin":
                 self._renew_ip_after_mac_change()
@@ -504,7 +515,8 @@ class OSPanel(ctk.CTkFrame):
                 be.restore_original_mac(self.current_adapter["id"])
             else:
                 import backend_macos as be
-                be.restore_original_mac(self.current_adapter["id"], self.original_mac)
+                be.restore_original_mac(self.current_adapter["id"], self.original_mac,
+                                         is_wifi=self.current_adapter.get("is_wifi", False))
             self.log(f"[{self.os_name}] Adresse d'origine restaurée : {self.original_mac}")
         except Exception as exc:  # noqa: BLE001
             self.log(f"[{self.os_name}] Échec de la restauration : {exc}", error=True)
@@ -574,9 +586,16 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("NetChameleon")
-        self.geometry("1120x950")
         self.configure(fg_color=COLOR_BG)
-        self.minsize(980, 700)
+
+        # Size relative to the actual screen instead of a fixed guess --
+        # a fixed height doesn't account for smaller displays, or menu
+        # bar / dock chrome eating into usable vertical space.
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        win_w = max(980, min(1120, int(screen_w * 0.80)))
+        win_h = max(680, min(950, int(screen_h * 0.82)))
+        self.geometry(f"{win_w}x{win_h}+{(screen_w - win_w) // 2}+{max(0, (screen_h - win_h) // 2 - 20)}")
+        self.minsize(min(920, win_w), min(620, win_h))
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=28, pady=(24, 8))
@@ -599,7 +618,7 @@ class App(ctk.CTk):
         log_frame = ctk.CTkFrame(self, fg_color=COLOR_PANEL_ALT, corner_radius=14)
         ctk.CTkLabel(log_frame, text="Journal", font=ui_font(12, "bold"), text_color=COLOR_TEXT_DIM
                      ).pack(anchor="w", padx=16, pady=(10, 0))
-        self.log_box = ctk.CTkTextbox(log_frame, height=190, fg_color=COLOR_PANEL_ALT, text_color=COLOR_TEXT,
+        self.log_box = ctk.CTkTextbox(log_frame, height=145, fg_color=COLOR_PANEL_ALT, text_color=COLOR_TEXT,
                                        font=mono_font(12), activate_scrollbars=True)
         self.log_box.pack(fill="x", padx=16, pady=(4, 14))
         self.log_box.configure(state="disabled")

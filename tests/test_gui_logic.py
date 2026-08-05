@@ -86,7 +86,7 @@ def test_apply_on_macos_triggers_followup_dhcp_renew(root, monkeypatch):
     fake.list_adapters = lambda: [{"port": "Wi-Fi", "device": "en0", "mac": "F0:18:98:1B:D7:93"}]
     fake.get_current_ip = lambda device: "192.168.1.50"
     fake.get_live_mac = lambda device: None
-    fake.set_mac_address = lambda device, mac: None
+    fake.set_mac_address = lambda device, mac, is_wifi=False: None
     renew_calls = []
     fake.renew_ip = lambda device: renew_calls.append(device)
     monkeypatch.setitem(sys.modules, "backend_macos", fake)
@@ -204,3 +204,70 @@ def test_sidebar_nav_button_highlights_active_section(panel):
     panel._show_section("ip")
     assert panel.nav_buttons["ip"].cget("fg_color") != "transparent"
     assert panel.nav_buttons["mac"].cget("fg_color") == "transparent"
+
+
+# --- is_wifi passthrough (Wi-Fi vs. Ethernet needs a different recovery path) ---
+
+def test_apply_mac_passes_is_wifi_true_for_a_wifi_adapter(root, monkeypatch):
+    fake = types.ModuleType("backend_macos")
+    fake.list_adapters = lambda: [{"port": "Wi-Fi", "device": "en0", "mac": "F0:18:98:1B:D7:93"}]
+    fake.get_current_ip = lambda device: "192.168.1.50"
+    fake.get_live_mac = lambda device: None
+    fake.renew_ip = lambda device: None
+    calls = []
+    fake.set_mac_address = lambda device, mac, is_wifi=False: calls.append((device, mac, is_wifi))
+    monkeypatch.setitem(sys.modules, "backend_macos", fake)
+
+    p = app_module.OSPanel(root, "Darwin", lambda msg, error=False: None)
+    root.update()
+    p.generate_preview()
+    pending = p.pending_mac
+    p.apply_mac()
+    assert calls == [("en0", pending, True)]
+
+
+def test_apply_mac_passes_is_wifi_false_for_ethernet(root, monkeypatch):
+    fake = types.ModuleType("backend_macos")
+    fake.list_adapters = lambda: [{"port": "USB 10/100/1000 LAN", "device": "en5", "mac": "AC:DE:48:00:11:22"}]
+    fake.get_current_ip = lambda device: "192.168.1.50"
+    fake.get_live_mac = lambda device: None
+    fake.renew_ip = lambda device: None
+    calls = []
+    fake.set_mac_address = lambda device, mac, is_wifi=False: calls.append((device, mac, is_wifi))
+    monkeypatch.setitem(sys.modules, "backend_macos", fake)
+
+    p = app_module.OSPanel(root, "Darwin", lambda msg, error=False: None)
+    root.update()
+    p.generate_preview()
+    pending = p.pending_mac
+    p.apply_mac()
+    assert calls == [("en5", pending, False)]
+
+
+# --- sticky adapter selection (field bug: jumped to Thunderbolt Bridge) ---
+
+def test_refresh_keeps_selection_even_if_it_transiently_has_no_ip(root, monkeypatch):
+    """
+    Field bug: right after applying a MAC change, Wi-Fi can briefly have
+    no IP while it reconnects. A refresh during that window must NOT
+    jump to a different adapter (e.g. Thunderbolt Bridge) just because
+    Wi-Fi's IP check failed at that exact moment.
+    """
+    fake = types.ModuleType("backend_windows")
+    fake.list_adapters = lambda: [
+        {"Name": "Bridge0", "InterfaceDescription": "Thunderbolt Bridge",
+         "MacAddress": "00-00-00-00-00-01", "Status": "Up"},
+        {"Name": "WiFi0", "InterfaceDescription": "Wi-Fi",
+         "MacAddress": "00-00-00-00-00-02", "Status": "Up"},
+    ]
+    ip_state = {"WiFi0": "192.168.1.50"}  # starts with an IP
+    fake.get_current_ip = lambda name: ip_state.get(name)
+    monkeypatch.setitem(sys.modules, "backend_windows", fake)
+
+    p = app_module.OSPanel(root, "Windows", lambda msg, error=False: None)
+    root.update()
+    assert p.current_adapter["id"] == "WiFi0"  # correctly auto-picked at first
+
+    ip_state.clear()  # simulate Wi-Fi transiently losing its IP mid-reconnect
+    p.refresh_adapters()
+    assert p.current_adapter["id"] == "WiFi0", "must stay on Wi-Fi, not jump to Bridge0"

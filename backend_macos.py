@@ -97,41 +97,49 @@ def get_live_mac(device: str):
     return match.group(1).upper() if match else None
 
 
-def set_mac_address(device: str, new_mac: str):
+def set_mac_address(device: str, new_mac: str, is_wifi: bool = False):
     """
-    Set the MAC address. Tries the direct form first -- `ifconfig <dev>
-    ether <mac>` without touching link state, which is what actually
-    works on most Wi-Fi drivers on recent macOS. If that's rejected --
-    including a transient 'Network is down' right after a previous
-    change, seen in the field while the interface is still settling --
-    retry once after a brief pause before falling back to the more
-    invasive down/change/up bracket. If the change step fails inside
-    that bracket, ALWAYS bring the interface back up before raising --
-    a failed attempt must never leave Wi-Fi disabled.
+    Set the MAC address.
+
+    First tries the direct form -- `ifconfig <dev> ether <mac>` without
+    touching link state -- which works for many Ethernet adapters and
+    some Wi-Fi drivers.
+
+    Field evidence: for an actively-associated Wi-Fi interface, a plain
+    `ifconfig down` / `up` bracket does NOT help -- the change is
+    rejected with the same 'Network is down' error either way, because
+    the radio hasn't actually released its association. Power-cycling
+    the AirPort radio itself (`networksetup -setairportpower`) does
+    release it properly, so that's the Wi-Fi-specific fallback. Plain
+    Ethernet-style adapters keep using the lighter ifconfig down/up
+    bracket. Either way, the interface/radio is ALWAYS restored to "on"
+    before raising, even if the change itself fails -- a failed attempt
+    must never leave the connection disabled.
     """
     try:
         _run(["ifconfig", device, "ether", new_mac.lower()], use_sudo=True)
         return
     except AdapterError:
-        pass
+        pass  # fall through to the more invasive, interface-type-specific recovery below
 
-    time.sleep(0.6)
-    try:
-        _run(["ifconfig", device, "ether", new_mac.lower()], use_sudo=True)
-        return
-    except AdapterError:
-        pass  # fall through to the more invasive down/up form below
+    if is_wifi:
+        _run(["networksetup", "-setairportpower", device, "off"], use_sudo=True)
+        time.sleep(0.5)
+        try:
+            _run(["ifconfig", device, "ether", new_mac.lower()], use_sudo=True)
+        finally:
+            _run(["networksetup", "-setairportpower", device, "on"], use_sudo=True)
+    else:
+        _run(["ifconfig", device, "down"], use_sudo=True)
+        time.sleep(0.3)
+        try:
+            _run(["ifconfig", device, "ether", new_mac.lower()], use_sudo=True)
+        finally:
+            _run(["ifconfig", device, "up"], use_sudo=True)
 
-    _run(["ifconfig", device, "down"], use_sudo=True)
-    time.sleep(0.3)
-    try:
-        _run(["ifconfig", device, "ether", new_mac.lower()], use_sudo=True)
-    finally:
-        _run(["ifconfig", device, "up"], use_sudo=True)
 
-
-def restore_original_mac(device: str, original_mac: str):
-    set_mac_address(device, original_mac)
+def restore_original_mac(device: str, original_mac: str, is_wifi: bool = False):
+    set_mac_address(device, original_mac, is_wifi=is_wifi)
 
 
 def renew_ip(device: str):
